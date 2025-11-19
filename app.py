@@ -8,7 +8,7 @@ from ultralytics import YOLO
 from PIL import Image, ImageDraw
 import numpy as np
 import pandas as pd
-import imageio_ffmpeg # <--- YENİ EKLENDİ
+import imageio_ffmpeg
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(
@@ -41,7 +41,11 @@ TEXTS = {
         "model_err": "Model yüklenemedi! Hata: {}",
         "class_names": {0: "Timsah Sirti", 1: "Boyuna Catlak", 2: "Cukur/Obruk", 3: "Enine Catlak"},
         "wait_msg": "Video işleniyor ve web formatına çevriliyor...",
-        "convert_err": "Video dönüştürme hatası!"
+        "convert_err": "Video dönüştürme hatası!",
+        "empty_state_title": "Analiz Bekleniyor",
+        "empty_state_msg": "👈 Lütfen sol menüden bir video yükleyerek işlemi başlatın.",
+        "ready_title": "Analize Hazır",
+        "ready_msg": "Video yüklendi. Analizi başlatmak için butona tıklayın."
     },
     "en": {
         "title": "🛣️ AI Road Damage Detection",
@@ -65,7 +69,11 @@ TEXTS = {
         "model_err": "Model failed to load! Error: {}",
         "class_names": {0: "Alligator Crack", 1: "Longitudinal Crack", 2: "Pothole", 3: "Transverse Crack"},
         "wait_msg": "Processing and converting video...",
-        "convert_err": "Video conversion error!"
+        "convert_err": "Video conversion error!",
+        "empty_state_title": "Waiting for Analysis",
+        "empty_state_msg": "👈 Please upload a video from the sidebar to start.",
+        "ready_title": "Ready to Analyze",
+        "ready_msg": "Video uploaded. Click the start button to proceed."
     }
 }
 
@@ -78,23 +86,27 @@ st.markdown("""
     .stButton>button:hover { background-color: #00ccaa; color: white; }
     .stProgress > div > div > div > div { background-color: #00ffcc; }
     div[data-testid="stMetricValue"] { font-size: 24px; color: #00ffcc; }
+    /* Empty State Styling */
+    .empty-state {
+        border: 2px dashed #333;
+        padding: 40px;
+        border-radius: 15px;
+        text-align: center;
+        color: #666;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- YARDIMCI FONKSİYON: FFmpeg Dönüştürücü (GÜNCELLENDİ) ---
+# --- YARDIMCI FONKSİYON: FFmpeg Dönüştürücü ---
 def convert_video_to_h264(input_path, output_path):
-    """Videoyu tarayıcı uyumlu H.264 formatına çevirir"""
-    # Sisteme kurulu FFmpeg yerine kütüphaneden gelen FFmpeg yolunu alıyoruz
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    
     command = [
-        ffmpeg_exe, '-y', # <--- Değişiklik burada: 'ffmpeg' yerine tam yol
+        ffmpeg_exe, '-y', 
         '-i', input_path, 
         '-vcodec', 'libx264', 
         '-pix_fmt', 'yuv420p', 
         output_path
     ]
-    # Windows'ta pencere açılmasını engellemek için creationflags (Opsiyonel ama temizdir)
     if os.name == 'nt':
         subprocess.run(command, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
     else:
@@ -108,16 +120,19 @@ with st.sidebar:
 
     st.write("---")
     st.header(t["sidebar_header"]) 
+    
+    uploaded_file = st.file_uploader(t["upload_label"], type=['mp4', 'avi', 'mov'])
+    
+    st.write("---")
     model_path = 'best.pt' 
     conf_threshold = st.slider(t["conf_label"], 0.10, 1.0, 0.25, 0.05)
     st.info(t["info_msg"])
     st.write("---")
     st.write(t["dev"])
 
+# --- ANA BAŞLIK ---
 st.title(t["title"])
 st.markdown(f"<h5 style='text-align: center; color: gray;'>{t['subtitle']}</h5>", unsafe_allow_html=True)
-
-COLORS = {0: (255, 140, 0), 1: (0, 255, 255), 2: (255, 0, 80), 3: (50, 255, 50)}
 
 # --- İŞLEME FONKSİYONU ---
 def process_entire_video(input_path, output_path, model, conf_thresh, lang_texts):
@@ -127,7 +142,6 @@ def process_entire_video(input_path, output_path, model, conf_thresh, lang_texts
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     
     temp_output = output_path.replace(".mp4", "_raw.mp4")
-    
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
 
@@ -135,6 +149,7 @@ def process_entire_video(input_path, output_path, model, conf_thresh, lang_texts
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     stats = {} 
     timeline_data = {} 
+    COLORS = {0: (255, 140, 0), 1: (0, 255, 255), 2: (255, 0, 80), 3: (50, 255, 50)}
     
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -173,7 +188,6 @@ def process_entire_video(input_path, output_path, model, conf_thresh, lang_texts
     out.release()
     progress_bar.progress(100)
     
-    # --- FFmpeg Dönüştürme Adımı ---
     status_text.text("Video web formatına çevriliyor (FFmpeg)...")
     try:
         convert_video_to_h264(temp_output, output_path)
@@ -186,29 +200,65 @@ def process_entire_video(input_path, output_path, model, conf_thresh, lang_texts
     status_text.empty()
     return stats, timeline_data, True
 
-# --- ANA AKIŞ ---
-uploaded_file = st.file_uploader(t["upload_label"], type=['mp4', 'avi', 'mov'])
+# --- ANA AKIŞ VE EMPTY STATE ---
+col1, col2 = st.columns([1, 1])
 
-if uploaded_file is not None:
-    tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-    tfile.write(uploaded_file.read())
-    
-    output_path = os.path.join(os.getcwd(), "sonuc.mp4")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader(t["orig_video"])
+# Sol Kolon: Video Önizleme veya Boş Durum
+with col1:
+    st.subheader(t["orig_video"])
+    if uploaded_file is not None:
+        # Geçici dosyaya kaydet
+        tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+        tfile.write(uploaded_file.read())
         st.video(tfile.name)
+    else:
+        # BOŞ DURUM GÖRSELİ (SOL)
+        st.markdown(f"""
+        <div class="empty-state">
+            <h1>🎥</h1>
+            <p>{t["empty_state_msg"]}</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    if st.sidebar.button(t["start_btn"]):
-        try:
-            model = YOLO(model_path)
-        except Exception as e:
-            st.error(t["model_err"].format(e))
-            st.stop()
-            
-        with col2:
-            st.subheader(t["results_header"])
+# Sağ Kolon: Sonuçlar veya Bekleme Ekranı
+with col2:
+    st.subheader(t["results_header"])
+    
+    if uploaded_file is None:
+        # BOŞ DURUM (SAĞ) - Video yoksa
+        st.markdown(f"""
+        <div class="empty-state">
+            <h1>📊</h1>
+            <h3>{t["empty_state_title"]}</h3>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    elif uploaded_file is not None:
+        # VİDEO VAR, BAŞLATMA BEKLENİYOR
+        # Buton artık burada (Sidebar yerine ana ekranda daha şık durabilir ama sidebar'da da kalabilir)
+        # Ben Sidebar'daki butonu kullanacağız varsayıyorum ama burada bilgi veriyoruz.
+        
+        # Analiz butonu SIDEBAR'daydı, buraya taşıyalım mı? 
+        # Kullanıcı deneyimi için butonu buraya (videonun yanına) almak daha mantıklı.
+        
+        start_analyze = st.button(t["start_btn"], use_container_width=True)
+        
+        if not start_analyze:
+             st.info(t["ready_msg"])
+             st.markdown(f"""
+                <div style="text-align: center; margin-top: 20px;">
+                    <h1>🚀</h1>
+                </div>
+             """, unsafe_allow_html=True)
+
+        if start_analyze:
+            try:
+                model = YOLO(model_path)
+            except Exception as e:
+                st.error(t["model_err"].format(e))
+                st.stop()
+                
+            output_path = os.path.join(os.getcwd(), "sonuc.mp4")
             start_time = time.time()
             
             with st.spinner(t["wait_msg"]):
@@ -233,6 +283,7 @@ if uploaded_file is not None:
                 st.error("Video işlendi fakat web formatına çevrilemedi. (FFmpeg hatası)")
 
             st.write("---")
+            # Metrikler
             st.markdown(f"### {t['metric_header']}")
             stat_cols = st.columns(4)
             idx = 0
@@ -244,6 +295,7 @@ if uploaded_file is not None:
             if not final_stats:
                 st.info(t["clean_msg"])
             
+            # Grafik
             if timeline_data:
                 st.write("---")
                 st.markdown(f"### {t['chart_header']}")
