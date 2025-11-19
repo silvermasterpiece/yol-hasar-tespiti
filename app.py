@@ -5,6 +5,7 @@ import os
 import time
 import subprocess
 from ultralytics import YOLO
+from PIL import Image, ImageDraw
 import numpy as np
 import pandas as pd
 import imageio_ffmpeg
@@ -73,7 +74,6 @@ def process_entire_video(input_path, output_path, model, conf_thresh):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     
-    # Geçici ham dosya
     temp_output = output_path.replace(".mp4", "_raw.mp4")
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
@@ -83,8 +83,10 @@ def process_entire_video(input_path, output_path, model, conf_thresh):
     stats = {} 
     timeline_data = {} 
     
+    # --- DÜZELTME BURADA: Değişkenleri tanımlıyoruz ---
     progress_bar = st.progress(0)
     status_text = st.empty()
+    # -------------------------------------------------
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -93,33 +95,26 @@ def process_entire_video(input_path, output_path, model, conf_thresh):
         frame_count += 1
         current_second = int(frame_count / fps)
         
-        # Model Tahmini
         results = model(frame, conf=conf_thresh, verbose=False)
-        
-        # Grafik verisi (o saniyedeki yoğunluk)
         detections_in_frame = len(results[0].boxes)
         timeline_data[current_second] = timeline_data.get(current_second, 0) + detections_in_frame
         
         for result in results:
             for box in result.boxes:
                 cls_id = int(box.cls[0])
-                conf = float(box.conf[0]) # Skor
+                conf = float(box.conf[0])
                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                 
-                color_bgr = COLORS.get(cls_id, (255, 255, 255))[::-1] # RGB -> BGR
+                color_bgr = COLORS.get(cls_id, (255, 255, 255))[::-1]
                 name = CLASS_NAMES.get(cls_id, "Bilinmeyen")
                 stats[name] = stats.get(name, 0) + 1
                 
-                # Kutu Çiz
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color_bgr, 2)
-                
-                # --- GÜNCELLENEN KISIM: İsim + Skor ---
                 label_text = f"{name} %{int(conf * 100)}"
                 cv2.putText(frame, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_bgr, 2)
 
         out.write(frame)
         
-        # İlerleme çubuğunu güncelle (Her 5 karede bir)
         if frame_count % 5 == 0:
             prog = frame_count / total_frames
             progress_bar.progress(prog)
@@ -143,37 +138,29 @@ def process_entire_video(input_path, output_path, model, conf_thresh):
 
 # --- ARAYÜZ BAŞLANGICI ---
 
-# Sidebar
 with st.sidebar:
     st.header("⚙️ Analiz Ayarları")
-    
     uploaded_file = st.file_uploader("Video Yükle (MP4, AVI)", type=['mp4', 'avi', 'mov'])
-    
     st.write("---")
     model_path = 'best.pt' 
     conf_threshold = st.slider("Güven Eşiği (Hassasiyet)", 0.10, 1.0, 0.25, 0.05)
-    
     st.info("ℹ️ Analiz tamamlandıktan sonra sonuçlar ekrana gelir.")
     st.write("---")
     st.write("Geliştirici: Anıl GÜMÜŞ")
 
-# Ana Başlık
 st.title("🛣️ AI Destekli Yol Hasar Analizi")
 st.markdown("<h5 style='text-align: center; color: gray;'>Yüksek Performanslı İşleme Modu</h5>", unsafe_allow_html=True)
 
-# Kılavuz
 with st.expander("ℹ️ Nasıl Kullanılır?"):
     st.markdown("""
     1. Sol menüden **Video Yükle** alanını kullanın.
     2. Ayarları isteğe bağlı değiştirin.
-    3. Sağ tarafta belirecek **Analizi Başlat** butonuna basın.
+    3. Sağ tarafta beliren **Analizi Başlat** butonuna basın.
     4. İşlem bitince raporu ve videoyu indirebilirsiniz.
     """)
 
-# Ana Akış Düzeni
 col1, col2 = st.columns([1, 1])
 
-# Sol Kolon: Video Gösterimi
 with col1:
     st.subheader("🎥 Orijinal Video")
     if uploaded_file is not None:
@@ -188,7 +175,6 @@ with col1:
         </div>
         """, unsafe_allow_html=True)
 
-# Sağ Kolon: İşlem ve Sonuçlar
 with col2:
     st.subheader("🔍 Sonuç ve Rapor")
     
@@ -232,7 +218,6 @@ with col2:
                     except:
                         st.warning("Video tarayıcıda oynatılamadı.")
                     
-                    # İndirme Butonları
                     btn_col1, btn_col2 = st.columns(2)
                     with btn_col1:
                         with open(output_path, 'rb') as f:
@@ -243,12 +228,10 @@ with col2:
                             df_report = pd.DataFrame(list(timeline_data.items()), columns=['Saniye', 'Hasar_Sayisi'])
                             csv = df_report.to_csv(index=False).encode('utf-8')
                             st.download_button("📄 RAPORU İNDİR (CSV)", csv, file_name='hasar_raporu.csv', mime='text/csv', use_container_width=True)
-
             else:
                 st.error("Video işlendi fakat kaydedilemedi.")
 
             st.write("---")
-            # İstatistikler
             st.markdown("### 📊 Toplam Hasar Özeti")
             stat_cols = st.columns(4)
             idx = 0
@@ -260,7 +243,6 @@ with col2:
             if not final_stats:
                 st.info("✅ Temiz Yol: Hiçbir hasar tespit edilmedi.")
             
-            # Grafik
             if timeline_data:
                 st.write("---")
                 st.markdown("### 📈 Hasar Yoğunluk Grafiği")
