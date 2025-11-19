@@ -3,10 +3,12 @@ import cv2
 import tempfile
 import os
 import time
+import subprocess
 from ultralytics import YOLO
 from PIL import Image, ImageDraw
 import numpy as np
 import pandas as pd
+import imageio_ffmpeg # <--- YENİ EKLENDİ
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(
@@ -38,8 +40,8 @@ TEXTS = {
         "processing": "Analiz ediliyor... %{}",
         "model_err": "Model yüklenemedi! Hata: {}",
         "class_names": {0: "Timsah Sirti", 1: "Boyuna Catlak", 2: "Cukur/Obruk", 3: "Enine Catlak"},
-        "wait_msg": "Video işleniyor, lütfen bekleyin...",
-        "file_err": "Video dosyası oluşturulamadı! (Sunucu Codec Hatası)"
+        "wait_msg": "Video işleniyor ve web formatına çevriliyor...",
+        "convert_err": "Video dönüştürme hatası!"
     },
     "en": {
         "title": "🛣️ AI Road Damage Detection",
@@ -62,8 +64,8 @@ TEXTS = {
         "processing": "Processing... %{}",
         "model_err": "Model failed to load! Error: {}",
         "class_names": {0: "Alligator Crack", 1: "Longitudinal Crack", 2: "Pothole", 3: "Transverse Crack"},
-        "wait_msg": "Processing video, please wait...",
-        "file_err": "Video file could not be created! (Server Codec Error)"
+        "wait_msg": "Processing and converting video...",
+        "convert_err": "Video conversion error!"
     }
 }
 
@@ -79,6 +81,25 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- YARDIMCI FONKSİYON: FFmpeg Dönüştürücü (GÜNCELLENDİ) ---
+def convert_video_to_h264(input_path, output_path):
+    """Videoyu tarayıcı uyumlu H.264 formatına çevirir"""
+    # Sisteme kurulu FFmpeg yerine kütüphaneden gelen FFmpeg yolunu alıyoruz
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    
+    command = [
+        ffmpeg_exe, '-y', # <--- Değişiklik burada: 'ffmpeg' yerine tam yol
+        '-i', input_path, 
+        '-vcodec', 'libx264', 
+        '-pix_fmt', 'yuv420p', 
+        output_path
+    ]
+    # Windows'ta pencere açılmasını engellemek için creationflags (Opsiyonel ama temizdir)
+    if os.name == 'nt':
+        subprocess.run(command, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    else:
+        subprocess.run(command, check=True)
+
 # --- KENAR ÇUBUĞU ---
 with st.sidebar:
     lang_option = st.radio("🌐 Language / Dil", ["Türkçe", "English"])
@@ -93,11 +114,9 @@ with st.sidebar:
     st.write("---")
     st.write(t["dev"])
 
-# --- ANA BAŞLIK ---
 st.title(t["title"])
 st.markdown(f"<h5 style='text-align: center; color: gray;'>{t['subtitle']}</h5>", unsafe_allow_html=True)
 
-# --- RENK PALETİ ---
 COLORS = {0: (255, 140, 0), 1: (0, 255, 255), 2: (255, 0, 80), 3: (50, 255, 50)}
 
 # --- İŞLEME FONKSİYONU ---
@@ -107,9 +126,10 @@ def process_entire_video(input_path, output_path, model, conf_thresh, lang_texts
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     
-    # Cloud için en güvenli codec: mp4v
+    temp_output = output_path.replace(".mp4", "_raw.mp4")
+    
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
 
     frame_count = 0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -152,9 +172,19 @@ def process_entire_video(input_path, output_path, model, conf_thresh, lang_texts
     cap.release()
     out.release()
     progress_bar.progress(100)
-    status_text.empty()
     
-    return stats, timeline_data
+    # --- FFmpeg Dönüştürme Adımı ---
+    status_text.text("Video web formatına çevriliyor (FFmpeg)...")
+    try:
+        convert_video_to_h264(temp_output, output_path)
+        if os.path.exists(temp_output):
+            os.remove(temp_output)
+    except Exception as e:
+        st.error(f"{lang_texts['convert_err']} {e}")
+        return stats, timeline_data, False
+
+    status_text.empty()
+    return stats, timeline_data, True
 
 # --- ANA AKIŞ ---
 uploaded_file = st.file_uploader(t["upload_label"], type=['mp4', 'avi', 'mov'])
@@ -163,7 +193,6 @@ if uploaded_file is not None:
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
     tfile.write(uploaded_file.read())
     
-    # Çıktı yolu (Daha güvenli bir path)
     output_path = os.path.join(os.getcwd(), "sonuc.mp4")
     
     col1, col2 = st.columns(2)
@@ -183,25 +212,25 @@ if uploaded_file is not None:
             start_time = time.time()
             
             with st.spinner(t["wait_msg"]):
-                final_stats, timeline_data = process_entire_video(tfile.name, output_path, model, conf_threshold, t)
+                final_stats, timeline_data, success = process_entire_video(tfile.name, output_path, model, conf_threshold, t)
             
             duration = time.time() - start_time
-            st.success(t["success_msg"].format(duration))
             
-            # --- GÜVENLİ DOSYA KONTROLÜ (BURASI YENİ) ---
-            if os.path.exists(output_path):
-                try:
-                    with open(output_path, 'rb') as video_file:
-                        video_bytes = video_file.read()
-                        st.video(video_bytes)
-                except:
-                    st.warning(t["video_err"])
+            if success:
+                st.success(t["success_msg"].format(duration))
+                
+                if os.path.exists(output_path):
+                    try:
+                        with open(output_path, 'rb') as video_file:
+                            video_bytes = video_file.read()
+                            st.video(video_bytes, format="video/mp4")
+                    except:
+                        st.warning(t["video_err"])
 
-                with open(output_path, 'rb') as f:
-                    st.download_button(t["download_btn"], f, file_name='analiz_sonucu.mp4')
+                    with open(output_path, 'rb') as f:
+                        st.download_button(t["download_btn"], f, file_name='analiz_sonucu.mp4')
             else:
-                st.error(t["file_err"])
-            # ----------------------------------------------
+                st.error("Video işlendi fakat web formatına çevrilemedi. (FFmpeg hatası)")
 
             st.write("---")
             st.markdown(f"### {t['metric_header']}")
