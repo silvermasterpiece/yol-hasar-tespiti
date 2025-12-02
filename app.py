@@ -5,70 +5,103 @@ import os
 import time
 import subprocess
 from ultralytics import YOLO
-from PIL import Image, ImageDraw
-import numpy as np
 import pandas as pd
 import imageio_ffmpeg
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(
-    page_title="AI Yol Hasar Analizi",
+    page_title="Silver Road - Hasar Analiz Platformu",
     page_icon="🛣️",
     layout="wide"
 )
-
-# --- MODERN CSS ---
+# --- YENİ KURUMSAL CSS TEMASI ---
 st.markdown("""
 <style>
-    .main { background-color: #0e1117; }
-    h1 { color: #00ffcc; text-align: center; font-family: 'Helvetica'; }
-    .stButton>button { width: 100%; background-color: #00ffcc; color: black; font-weight: bold; border: none; height: 50px; border-radius: 10px; }
-    .stButton>button:hover { background-color: #00ccaa; color: white; }
-    .stProgress > div > div > div > div { background-color: #00ffcc; }
-    div[data-testid="stMetricValue"] { font-size: 24px; color: #00ffcc; }
+    /* Ana Arka Plan */
+    .main {
+        background-color: #f8f9fa; 
+    }
+    /* Başlıklar */
+    h1, h2, h3 {
+        color: #2c3e50;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        font-weight: 600;
+    }
+    /* Sidebar (Yan Menü) */
+    [data-testid="stSidebar"] {
+        background-color: #2c3e50;
+    }
+    [data-testid="stSidebar"] * {
+        color: white !important;
+    }
+    /* Butonlar */
+    .stButton>button {
+        background-color: #e74c3c; /* Kiremit Kırmızısı */
+        color: white;
+        border-radius: 8px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        transition: all 0.3s ease;
+        border: none;
+        height: 50px;
+        font-weight: 600;
+    }
+    .stButton>button:hover {
+        background-color: #c0392b;
+        transform: translateY(-2px);
+        box-shadow: 0 6px 8px rgba(0,0,0,0.2);
+        color: white;
+    }
+    /* Metrik Kutuları */
+    div[data-testid="stMetricValue"] {
+        color: #e74c3c;
+        font-weight: bold;
+    }
+    /* Progress Bar Rengi */
+    .stProgress > div > div > div > div {
+        background-color: #e74c3c;
+    }
+    /* Boş Durum Kutusu (Empty State) */
     .empty-state {
-        border: 2px dashed #333;
+        border: 2px dashed #bdc3c7;
         padding: 40px;
         border-radius: 15px;
         text-align: center;
-        color: #666;
+        color: #7f8c8d;
+        background-color: white;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- SABİT AYARLAR (Türkçe) ---
+# --- MODEL ÖNBELLEKLEME (HIZLANDIRMA) ---
+@st.cache_resource
+def load_model(path):
+    return YOLO(path)
+
+# --- SABİT AYARLAR ---
 CLASS_NAMES = {
-    0: "Timsah Sirti", 
-    1: "Boyuna Catlak", 
-    2: "Cukur/Obruk", 
-    3: "Enine Catlak"
+    0: "Catlak", 
+    1: "Cukur", 
+    2: "Kasis"
 }
 
 COLORS = {
-    0: (255, 140, 0),   # Turuncu
-    1: (0, 255, 255),   # Cyan
-    2: (255, 0, 80),    # Kırmızı
-    3: (50, 255, 50)    # Yeşil
+    0: (0, 255, 255),   # Çatlak (Sarı/Cyan)
+    1: (255, 0, 0),     # Çukur (Kırmızı)
+    2: (255, 165, 0)    # Kasis (Turuncu)
 }
 
-# --- YARDIMCI FONKSİYON: FFmpeg Dönüştürücü ---
+# --- YARDIMCI FONKSİYONLAR ---
 def convert_video_to_h264(input_path, output_path):
-    """Videoyu tarayıcı uyumlu H.264 formatına çevirir"""
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     command = [
-        ffmpeg_exe, '-y', 
-        '-i', input_path, 
-        '-vcodec', 'libx264', 
-        '-pix_fmt', 'yuv420p', 
-        output_path
+        ffmpeg_exe, '-y', '-i', input_path, '-vcodec', 'libx264', '-pix_fmt', 'yuv420p', output_path
     ]
     if os.name == 'nt':
         subprocess.run(command, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
     else:
         subprocess.run(command, check=True)
 
-# --- İŞLEME FONKSİYONU ---
-def process_entire_video(input_path, output_path, model, conf_thresh):
+def process_entire_video(input_path, output_path, model, conf_thresh, hood_mask_ratio):
     cap = cv2.VideoCapture(input_path)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -82,11 +115,10 @@ def process_entire_video(input_path, output_path, model, conf_thresh):
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     stats = {} 
     timeline_data = {} 
-    
-    # --- DÜZELTME BURADA: Değişkenleri tanımlıyoruz ---
+    ignore_threshold = int(height * (1 - hood_mask_ratio))
+
     progress_bar = st.progress(0)
     status_text = st.empty()
-    # -------------------------------------------------
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -94,158 +126,149 @@ def process_entire_video(input_path, output_path, model, conf_thresh):
         
         frame_count += 1
         current_second = int(frame_count / fps)
-        
         results = model(frame, conf=conf_thresh, verbose=False)
-        detections_in_frame = len(results[0].boxes)
-        timeline_data[current_second] = timeline_data.get(current_second, 0) + detections_in_frame
+        detections_in_frame = 0
         
         for result in results:
             for box in result.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                if (y1 + y2) / 2 > ignore_threshold: continue 
+
+                detections_in_frame += 1
                 cls_id = int(box.cls[0])
                 conf = float(box.conf[0])
-                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                
-                color_bgr = COLORS.get(cls_id, (255, 255, 255))[::-1]
                 name = CLASS_NAMES.get(cls_id, "Bilinmeyen")
-                stats[name] = stats.get(name, 0) + 1
+                color_bgr = COLORS.get(cls_id, (255, 255, 255))[::-1]
                 
+                stats[name] = stats.get(name, 0) + 1
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color_bgr, 2)
-                label_text = f"{name} %{int(conf * 100)}"
-                cv2.putText(frame, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_bgr, 2)
+                
+                label_text = f"{name} {int(conf * 100)}%"
+                (w, h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                cv2.rectangle(frame, (x1, y1 - 20), (x1 + w, y1), color_bgr, -1)
+                cv2.putText(frame, label_text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
+        if hood_mask_ratio > 0:
+            cv2.line(frame, (0, ignore_threshold), (width, ignore_threshold), (0, 0, 255), 1)
+
+        timeline_data[current_second] = timeline_data.get(current_second, 0) + detections_in_frame
         out.write(frame)
         
         if frame_count % 5 == 0:
             prog = frame_count / total_frames
             progress_bar.progress(prog)
-            status_text.text(f"Analiz ediliyor... %{int(prog*100)}")
+            status_text.text(f"İşleniyor... %{int(prog*100)}")
 
     cap.release()
     out.release()
     progress_bar.progress(100)
     
-    status_text.text("Video web formatına çevriliyor (FFmpeg)...")
+    status_text.text("Format dönüştürülüyor...")
     try:
         convert_video_to_h264(temp_output, output_path)
-        if os.path.exists(temp_output):
-            os.remove(temp_output)
+        if os.path.exists(temp_output): os.remove(temp_output)
     except Exception as e:
-        st.error(f"Video dönüştürme hatası: {e}")
         return stats, timeline_data, False
 
     status_text.empty()
     return stats, timeline_data, True
 
-# --- ARAYÜZ BAŞLANGICI ---
-
+# --- ARAYÜZ (SIDEBAR) ---
 with st.sidebar:
-    st.header("⚙️ Analiz Ayarları")
-    uploaded_file = st.file_uploader("Video Yükle (MP4, AVI)", type=['mp4', 'avi', 'mov'])
-    st.write("---")
-    model_path = 'best.pt' 
-    conf_threshold = st.slider("Güven Eşiği (Hassasiyet)", 0.10, 1.0, 0.25, 0.05)
-    st.info("ℹ️ Analiz tamamlandıktan sonra sonuçlar ekrana gelir.")
-    st.write("---")
-    st.write("Geliştirici: Anıl GÜMÜŞ")
+    # --- LOGO ENTEGRASYONU (DÜZELTİLDİ) ---
+    logo_path = "silveroad.png"  # Logo dosyasının adı
+    if os.path.exists(logo_path):
+        # DÜZELTME BURADA: use_container_width=True kullanıldı
+        st.image(logo_path, use_container_width=True)
+    else:
+        # Logo yoksa metin göster
+        st.title("🛣️ Silver Road")
+        st.warning(f"'{logo_path}' dosyası bulunamadı.")
 
-st.title("🛣️ AI Destekli Yol Hasar Analizi")
-st.markdown("<h5 style='text-align: center; color: gray;'>Yüksek Performanslı İşleme Modu</h5>", unsafe_allow_html=True)
+    st.markdown("---")
+    st.header("⚙️ Analiz Parametreleri")
+    
+    uploaded_file = st.file_uploader("Video Dosyası Seçin", type=['mp4', 'avi', 'mov'])
+    
+    st.markdown("### 🎛️ Model Ayarları")
+    model_path = 'best.pt'
+    conf_threshold = st.slider("Güven Eşiği", 0.10, 1.0, 0.40, 0.05)
+    hood_mask = st.slider("🚘 Kaput Maskesi (%)", 0, 50, 15, 5)
+    hood_ratio = hood_mask / 100.0
+    
+    st.markdown("---")
+    st.caption("SilveRoad - By Anıl GÜMÜŞ")
 
-with st.expander("ℹ️ Nasıl Kullanılır?"):
-    st.markdown("""
-    1. Sol menüden **Video Yükle** alanını kullanın.
-    2. Ayarları isteğe bağlı değiştirin.
-    3. Sağ tarafta beliren **Analizi Başlat** butonuna basın.
-    4. İşlem bitince raporu ve videoyu indirebilirsiniz.
-    """)
+# --- ANA EKRAN ---
+st.title("Yol Kusur Tespit ve Analiz Sistemi")
+st.markdown("Yapay zeka destekli otonom yol denetim arayüzü.")
 
-col1, col2 = st.columns([1, 1])
+col1, col2 = st.columns([1, 1], gap="medium")
 
 with col1:
-    st.subheader("🎥 Orijinal Video")
+    st.markdown("### 🎥 Kaynak Görüntü")
     if uploaded_file is not None:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
         tfile.write(uploaded_file.read())
         st.video(tfile.name)
     else:
-        st.markdown("""
-        <div class="empty-state">
-            <h1>🎥</h1>
-            <p>👈 Lütfen sol menüden bir video yükleyin.</p>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown('<div class="empty-state"><h3>Video Bekleniyor</h3><p>Analiz için sol menüden dosya yükleyiniz.</p></div>', unsafe_allow_html=True)
 
 with col2:
-    st.subheader("🔍 Sonuç ve Rapor")
+    st.markdown("### 📊 Analiz Raporu")
     
     if uploaded_file is None:
-        st.markdown("""
-        <div class="empty-state">
-            <h1>📊</h1>
-            <h3>Analiz Bekleniyor</h3>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown('<div class="empty-state"><h3>Sonuçlar</h3><p>İşlem başlatıldığında veriler burada görünecektir.</p></div>', unsafe_allow_html=True)
     
     elif uploaded_file is not None:
-        start_analyze = st.button("🚀 ANALİZİ BAŞLAT", use_container_width=True)
-        
-        if not start_analyze:
-             st.info("Video yüklendi. Analizi başlatmak için yukarıdaki butona tıklayın.")
-
-        if start_analyze:
+        if st.button("ANALİZİ BAŞLAT", use_container_width=True):
+            if not os.path.exists(model_path):
+                st.error("Model dosyası (best.pt) bulunamadı.")
+                st.stop()
+                
             try:
-                model = YOLO(model_path)
+                model = load_model(model_path)
             except Exception as e:
-                st.error(f"Model yüklenemedi! Hata: {e}")
+                st.error(f"Model Hatası: {e}")
                 st.stop()
                 
             output_path = os.path.join(os.getcwd(), "sonuc.mp4")
-            start_time = time.time()
             
-            with st.spinner("Yapay zeka videoyu inceliyor..."):
-                final_stats, timeline_data, success = process_entire_video(tfile.name, output_path, model, conf_threshold)
-            
-            duration = time.time() - start_time
+            with st.spinner("AI Görüntü İşleme Motoru Çalışıyor..."):
+                final_stats, timeline_data, success = process_entire_video(tfile.name, output_path, model, conf_threshold, hood_ratio)
             
             if success:
-                st.success(f"Analiz {duration:.1f} saniyede tamamlandı!")
+                st.success("İşlem Başarıyla Tamamlandı.")
                 
+                # Video Oynatıcı
                 if os.path.exists(output_path):
-                    try:
-                        with open(output_path, 'rb') as video_file:
-                            video_bytes = video_file.read()
-                            st.video(video_bytes, format="video/mp4")
-                    except:
-                        st.warning("Video tarayıcıda oynatılamadı.")
+                    with open(output_path, 'rb') as vf:
+                        vbytes = vf.read()
+                        st.video(vbytes)
                     
-                    btn_col1, btn_col2 = st.columns(2)
-                    with btn_col1:
-                        with open(output_path, 'rb') as f:
-                            st.download_button("📹 VİDEOYU İNDİR", f, file_name='analiz_sonucu.mp4', use_container_width=True)
-                    
-                    with btn_col2:
+                    # Buton Grubu
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.download_button("📥 İşlenmiş Videoyu İndir", vbytes, file_name='detected_road.mp4', mime="video/mp4", use_container_width=True)
+                    with c2:
                         if timeline_data:
-                            df_report = pd.DataFrame(list(timeline_data.items()), columns=['Saniye', 'Hasar_Sayisi'])
-                            csv = df_report.to_csv(index=False).encode('utf-8')
-                            st.download_button("📄 RAPORU İNDİR (CSV)", csv, file_name='hasar_raporu.csv', mime='text/csv', use_container_width=True)
-            else:
-                st.error("Video işlendi fakat kaydedilemedi.")
+                            df = pd.DataFrame(list(timeline_data.items()), columns=['Saniye', 'Hasar'])
+                            csv = df.to_csv(index=False).encode('utf-8')
+                            st.download_button("📊 CSV Raporu İndir", csv, file_name='data.csv', mime='text/csv', use_container_width=True)
+                
+                # İstatistikler
+                st.markdown("#### Tespit Özeti")
+                if final_stats:
+                    scols = st.columns(len(final_stats))
+                    for i, (k, v) in enumerate(final_stats.items()):
+                        scols[i].metric(label=k, value=v)
+                else:
+                    st.info("Kusur tespit edilmedi.")
 
-            st.write("---")
-            st.markdown("### 📊 Toplam Hasar Özeti")
-            stat_cols = st.columns(4)
-            idx = 0
-            for damage_name, count in final_stats.items():
-                with stat_cols[idx % 4]:
-                    st.metric(label=damage_name, value=f"{count}")
-                idx += 1
-            
-            if not final_stats:
-                st.info("✅ Temiz Yol: Hiçbir hasar tespit edilmedi.")
-            
-            if timeline_data:
-                st.write("---")
-                st.markdown("### 📈 Hasar Yoğunluk Grafiği")
-                chart_data = pd.DataFrame(list(timeline_data.items()), columns=['Saniye', 'Hasar Sayısı']).set_index('Saniye')
-                st.area_chart(chart_data, color="#00ffcc")
-                st.caption("Grafik, videonun hangi saniyesinde ne kadar hasar tespit edildiğini gösterir.")
+                # Grafik
+                if timeline_data:
+                    st.markdown("#### Hasar/Zaman Grafiği")
+                    chart_data = pd.DataFrame(list(timeline_data.items()), columns=['Sn', 'Adet']).set_index('Sn')
+                    st.line_chart(chart_data)
+            else:
+                st.error("Video işleme sırasında bir hata oluştu.")
